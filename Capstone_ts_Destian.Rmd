@@ -1,0 +1,549 @@
+---
+title: "Capstone_ML_Destian"
+author: "Destian.F"
+date: "2022-12-14"
+output:  
+  html_document:
+    html_document:
+    toc: true
+    toc_depth: 3
+    toc_float: 
+        collapsed: true
+        smooth_scroll: true
+    number_sections: true
+    theme: flatly
+    highlight: zenburn
+  fig_caption: yes
+  pdf_document:
+    latex_engine: xelatex
+    fig_caption: yes
+  word_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+# Background
+
+“It’s friday night!”
+
+Customer behaviour, especially in the food and beverage industry is highly related to seasonality patterns. The owner wants to analyze the number of visitors (includes dine in, delivery, and takeaway transactions) so he could make better judgment in 2018. Fortunately, we already know that time series analysis is enough to provide a good forecast and seasonality explanation.
+
+# Working Data & Library
+
+Library Usage :
+
+```{r}
+library(dplyr)
+library(lubridate) 
+library(tidyr)
+library(ggplot2)
+library(TSstudio) 
+library(forecast)
+library(readr)
+library(padr)
+library(zoo)
+library(ggsci)
+library(plotly)
+
+```
+
+
+
+Read the source file : Train Data - data-train.csv and Test Data - data-test.csv.
+
+```{r}
+fnb <- read_csv("data-train.csv")
+```
+# Data Structure review
+
+View Train Data, Train Data will be used for Training and Validation
+
+```{r}
+head(fnb,3)
+```
+The dataset includes information about:
+
+    - transaction_date: The timestamp of a transaction
+
+    - receipt_number: The ID of a transaction
+
+    - item_id : The ID of an item in a transaction
+
+    - item_group : The group ID of an item in a transaction
+
+    - item_major_group : The major-group ID of an item in a transaction
+
+    - quantity : The quantity of purchased item
+
+    - price_usd : The price of purchased item
+
+    - total_usd : The total price of purchased item
+
+    - payment_type : The payment method
+
+    - sales_type : The sales method
+
+    
+# Data Preprocess 
+
+  Below is the Preprocess Step which need to be done before conducting further analysis. Round datetime into hour, by using floor_date, save the result into ds column
+
+```{r}
+fnb_clean <- fnb %>% 
+  mutate(transaction_date=ymd_hms(transaction_date),
+         ds = floor_date(transaction_date, unit = "hours")) %>%
+  select(transaction_date, receipt_number, ds)
+```
+
+
+Aggregate/summarise ds column (Date Time in hour) and receipt_number column to get the number of visitors
+```{r}
+fnb_clean <- fnb_clean %>% group_by(ds) %>% summarise(visitor = n_distinct(receipt_number)) 
+```
+
+Time Series Padding, to fill missing data series (in hour), so each day time Series data will consist of 24 records - 24 hours / per days.
+```{r}
+fnb_clean <- fnb_clean %>% pad()
+```
+
+Replace NA Value
+
+```{r}
+fnb_clean <- fnb_clean %>% mutate(visitor = na.fill(visitor, 0))
+```
+
+```{r}
+fnb_clean
+```
+
+Check any NA and No Further NA found
+```{r}
+# Check NA 
+colSums(is.na(fnb_clean))
+```
+
+Filter Date Time in hour (ds) to capture range time of Outlet Open, from 10.00 to 22.00
+```{r}
+fnb_clean <- fnb_clean %>% filter(hour(ds) >=10 & hour(ds) <=22)
+```
+
+Check Start & End of the time interval after filtering :
+```{r}
+range(fnb_clean$ds)
+```
+
+```{r}
+tail(fnb_clean,10)
+```
+# Seasonality Analysis
+
+## Observation & Decomposition
+
+Create Time Series Object using ts() function with frequency 13, where 13 is time range of the outlet open everyday, from 10.00 to 22.00.
+```{r}
+fnb_ts <- ts(fnb_clean$visitor, frequency = 13)
+```
+Decompose and Plotting to inspect Seasonal, Trend and Irregular component of time series
+
+```{r}
+fnb_ts_dec <- fnb_ts %>% decompose(type = "additive")
+
+fnb_ts %>% tail(13*7*4) %>%  decompose() %>% autoplot()
+```
+Explanation :
+
+From above plot, the Estimated Trend component is showing a pattern, where it might contains un-captured extra seasonality and this can be considered as multi-seasonal data. To solve multi-seasonality, we need to convert the data into “Multiple Seasonality Time Series” which accept multiple frequency setting.
+
+Create “Multi-seasonality Time Series” Object using msts() function, with Frequency : Daily (13) and Weekly (13*7), this will capture seasonality in Daily and Weekly. Then decompose and plotting.
+
+```{r}
+fnb_msts <- msts(data = fnb_clean$visitor,seasonal.periods = c(13,13*7))
+
+fnb_msts_dec <- mstl(fnb_msts)
+
+fnb_msts %>% tail(13*7*4) %>% stl(s.window = "periodic") %>% autoplot()
+```
+Explanation :
+
+Based on above Plot, now the Estimated Trend with “Multiple Seasonality Time Series” is more smoother and clearer. And also more clearer on Daily and Weekly Seasonality, more explainable for further analysis.
+
+## Seasonality by Hour
+
+Create Visualization of Seasonality by hour from “Standard Time Series” Object ts() and provide explanation.
+```{r}
+fnb_clean %>% 
+  mutate(Hour = hour(ds), Seasonal = fnb_ts_dec$seasonal) %>% 
+  distinct(Hour, Seasonal) %>% 
+  ggplot() +
+  geom_bar(aes(x = Hour, y = Seasonal, fill = Seasonal), stat ="identity", width = 0.7)+
+  scale_fill_gradient(low = "black", high = "red") +
+  scale_x_continuous(breaks = seq(10,22,1)) +
+  labs(title = "Seasonality Analysis  - Hourly")
+```
+Explanation :
+
+Based on above plot, Peak Time range of the Outlet is between 19.00 - 22.00, and at 20.00 is the time where most Visitor come. And at 10.00 is the time where the least visitors come to the Outlet as the Outlet just started/opened.
+
+## Seasonality by Week & Hour
+
+Create Visualization of Seasonality by week and hour from “Multi-Seasonal Time Series” Object msts() and provide explanation.
+
+```{r}
+
+fnb_msts_dec_fr <- data.frame(fnb_msts_dec)
+
+fnb_msts_dec_fr %>%
+  mutate(ds = fnb_clean$ds) %>% 
+  mutate(Day_of_Week  = wday(ds, label = TRUE, abbr = FALSE), Hour = (hour(ds))) %>% 
+  group_by(Day_of_Week, Hour) %>%
+  summarise(Seasonal = sum(Seasonal13 + Seasonal91)) %>%
+  ggplot() +
+  geom_bar(aes(x = Hour, y = Seasonal, fill = Day_of_Week),stat ="identity", position = "stack", width = 0.7)+
+  scale_x_continuous(breaks = seq(10,22,1)) +
+  scale_fill_locuszoom()+
+  labs(title = "Multi-Seasonality Analysis  - Weekly & Hourly")
+```
+Explanation :
+
+Based on above plot, Peak Time range of the Outlet is between 19.00 - 22.00 every day of the week, and On Saturday at 20.00 is the time where most Visitor come. And at 10.00 - every day of the week, is the time where the least visitors come as the Outlet just started/opened.
+
+# Model Fitting and Evaluation
+
+## Cross Validation
+
+We will split our train data into two type of data set named train and validation'. Ourvalidation` data will be a set of data consist of the last seven days of the restaurant operational hour.
+```{r}
+# Cross Validation
+
+fnb_test_msts <- tail(fnb_clean, 13*7)
+
+fnb_test_msts$visitor <- round(fnb_test_msts$visitor)
+
+fnb_train_msts <- head(fnb_clean, nrow(fnb_clean) - 13*7)
+
+fnb_train_msts$visitor <- round(fnb_train_msts$visitor)
+
+# Plot data Train & Validation 
+
+Plot <- fnb_train_msts %>%
+   ggplot(aes(x = ds, y = visitor)) +
+   geom_line() +
+   scale_x_datetime(name = "Transaction Date", 
+                    date_breaks = "2 weeks", 
+                    expand = expansion(mult = 0.05, add = 0.05)) +
+   scale_y_continuous(breaks = seq(0, 400, 50), expand = expansion(mult = 0.05, add = 0.05)) +
+   geom_line(data = fnb_test_msts, 
+             aes(color = "red"), 
+             show.legend = T)
+  
+ggplotly(Plot)
+```
+The graphic above shows us the composition of our data:
+
+train data started from 2017-12-01 into 2018-02-11
+validation data started from 2018-02-12 into 2018-02-18
+
+## Modelling
+  After we succeed creating the MSTS object, we will try to put our object into several models. Some models that we will try to create is
+
+    - Multi-Seasonal ARIMA model
+    - Multi-Seasonal Holt-Winter
+    - TBATS Model
+
+1. Multi-Seasonal ARIMA :
+
+```{r}
+# Create Model
+model_arima <- stlm(fnb_msts, method = "arima")
+```
+2. Multi-seasonal Holt-Winter
+
+```{r}
+# Create Model
+model_hw <- stlm(fnb_msts, method = "ets")
+```
+
+3. TBATS model
+
+```{r}
+# Create Model
+
+ model_tbats <- fnb_msts %>%
+   tbats(use.box.cox = F,
+         use.trend = T,
+         use.damped.trend = T)
+
+```
+
+
+## Forecast
+
+```{r}
+forecast_arima <- forecast(model_arima, h = 13*7)
+forecast_hw <- forecast(model_hw, h = 13*7)
+forecast_tbats <- forecast(model_tbats, h = 13*7)
+```
+
+## Visualisasi
+!. Multi-Seasonal ARIMA :
+```{r}
+fnb_msts %>% 
+  autoplot(series = "actual") +
+  autolayer(forecast_arima$fitted, series = "train") +
+  autolayer(forecast_arima$mean, series = "test") +
+  theme_minimal()
+```
+2. Multi-seasonal Holt-Winter
+```{r}
+fnb_msts %>% 
+  autoplot(series = "actual") +
+  autolayer(forecast_hw$fitted, series = "train") +
+  autolayer(forecast_hw$mean, series = "test") +
+  theme_minimal()
+```
+3. TBATS model
+```{r}
+fnb_msts %>% 
+  autoplot(series = "actual") +
+  autolayer(forecast_tbats$fitted, series = "train") +
+  autolayer(forecast_tbats$mean, series = "test") +
+  theme_minimal()
+```
+
+## Compare accuracy
+
+Evaluate Models Performance
+```{r}
+modelacc <- rbind(
+  accuracy(forecast_arima$mean, fnb_test_msts$visitor),
+  accuracy(forecast_hw$mean, fnb_test_msts$visitor),
+  accuracy(forecast_tbats$mean, fnb_test_msts$visitor))
+
+rownames(modelacc) <- c("Multi-Seasonal ARIMA", "Multi-seasonal Holt-Winter", "TBATS model" )
+modelacc
+```
+
+Based on above Accuracy Summary, The Accuracy of "Multi-Seasonal ARIMA” is better, MAE is 4.569183 (lower than 6), this model will be chosen to be used for Prediction -> The Best Model is “ARIMA Model”.
+
+# Visualization Actual vs Estimated
+
+Data Preparation for the Plot :
+```{r}
+accuracyData <- data.frame(ds= fnb_clean$ds %>% tail(13*7),
+  Actual = as.vector(fnb_test_msts) ,
+  TBATSForecast = as.vector(forecast_tbats$mean),
+  ArimaForecast = as.vector(forecast_arima$mean),
+  HWForecast = as.vector(forecast_hw$mean))
+```
+
+# Visualization of Actual vs Estimated number of visitors (Best Model)
+```{r}
+accuracyData %>% 
+ ggplot() +
+  geom_line(aes(x = ds, y = Actual.visitor, colour = "Actual"),size=1)+
+  geom_line(aes(x = ds, y = ArimaForecast, colour = "Multi-Seasonal ARIMA Model "),size=1)+
+  labs(title = "Hourly Visitor - Actual Vs Multi-Seasonal ARIMA Model ",x = "Date",y = "Visitor",colour = "")
+```
+# Visualization of Actual vs Estimated number of visitors (All Models)
+```{r}
+accuracyData %>% 
+ ggplot() +
+  geom_line(aes(x = ds, y = Actual.visitor, colour = "Actual"),size=0.5)+
+  geom_line(aes(x = ds, y = HWForecast, colour = "Holt Winter Model"),size=0.1)+
+  geom_line(aes(x = ds, y = ArimaForecast, colour = "Arima Model (Best Model)"),size=0.5)+
+  geom_line(aes(x = ds, y = TBATSForecast, colour = "TBATS Model"),size=0.5)+
+  labs(title = "Hourly Visitor - Actual Vs All Models",x = "Date",y = "Visitor",colour = "")
+```
+# Prediction Performance
+## MAE \< 6 in validation dataset
+
+The Best Model is "Arima Model" as it has MAE Accuracy 4.569183, the smallest MAE compare the other created models.
+```{r}
+accuracy(forecast_arima$mean, fnb_test_msts$visitor)
+```
+
+##MAE \< 6 in test dataset
+
+Predict using "Multi-Seasonal Data" and save The Prediction into CSV File `submission-destian.csv` by using The Best Model and Forecast : "ARIMA Mode". The Step :
+```{r}
+knitr::include_graphics("MAE.png")
+```
+```{r}
+fnb_test  <- read_csv("data-test.csv")
+```
+
+```{r}
+fnb_test$visitor <- forecast_arima$mean
+```
+
+```{r}
+write.csv(fnb_test, "submission-destian.csv", row.names = F)
+```
+# Summary
+## Asumsion
+
+We will check the Autocorrelation and Normality of our new model residual with the same test we used previously
+
+1.  Autocorrelation test
+```{r}
+# Residual Autocorrelation
+   
+Box.test(model_arima$residuals, type = "Ljung-Box",)
+```
+Conclucsion: p-value \> 0.05, so we can assume there's no-autocorrelation for residuals.
+
+2.  Normality of residuals
+```{r}
+shapiro.test(model_arima$residuals)
+```
+```{r}
+hist(model_arima$residual, breaks = 30)
+```
+p-value \> 0.05 : Residual normally distributed
+
+p-value \< 0.05 : Residual not normally distributed
+
+The p-value \< 0.05 so it can be concluded that the residuals are not normally distributed. This can happen because the size of the data held to form the model is not large enough. However, it does not mean that the model has bad forecasting performance. In this case, you can add the amount of data to build the model so that the residuals can be normally distributed and the forecasting performance is better. In addition, because the assumption of normality is not met, the error value obtained is not constant at 0. This causes if a forecast is to be made on data with a longer horizon, the error will tend to be larger. To overcome this, every time there is new historical data, a forecasting model must be re-built.
+
+3.  Highest visitor
+```{r}
+fnb_test %>% 
+   mutate(hour=hour(datetime),
+          seasonal=visitor,
+          wday=wday(datetime, label = T, abbr = T)) %>% 
+
+ggplot(aes(x = hour, y = seasonal))+
+   geom_col(aes(fill=wday))+
+   labs(title = "Seasonality across hour and weekdays", x = "Hour", y="Visitors")+
+   theme_minimal()+
+   theme(legend.position = "right")
+```
+the highest visitor come to restaurant is on 20.00 WIB. also the highest day on Saturday
+
+# Model Tuning
+The assumption checking shown us that our model’s residual failed to fulfill the assumptions, means that our model is not optimal enough and can be improved.
+
+To fulfill these assumptions, we will try to transform our data. Using recipes package, we will transform our data into it square-root value and do some scalling.
+
+```{r}
+# Data transformation
+
+rec <- recipe(visitor ~., data = fnb_train_msts) %>%
+   step_sqrt(all_outcomes()) %>% 
+   step_center(all_outcomes()) %>%
+   step_scale(all_outcomes()) %>%
+   prep()
+
+# Ubah data train
+
+fnb_train_rec <- juice(rec)
+
+
+# Ubah data val
+
+fnb_val_rec <- bake(rec, fnb_test_msts)
+```
+
+We can see below that our visitor column have been transformed into in root-square value and already beig scaled. this data will be used as our new train data.
+
+```{r}
+tail(fnb_train_rec, 3)
+```
+
+We also going to create a revert function, which will reverting our forecast value so it will be correctly compared with our validation data.
+
+```{r}
+# Revert Function
+
+rec_rev <- function(x, rec) {
+   
+   means <- rec$steps[[2]]$means[["visitor"]]
+   sds <- rec$steps[[3]]$sds[["visitor"]]
+   
+   x <- (x * sds + means)^2
+   x <- round(x)
+   #x <- exp(x)
+   x <- ifelse(x < 0, 0, x)
+   
+   #X <- exp(x) kalo jadi log
+   
+   x
+   
+}
+```
+
+# Create Time Series Object based on Transformed Data
+```{r}
+# Create MSTS object based on data train and val rec
+
+fnb_multi_rec <- msts(fnb_train_rec$visitor, 
+                  seasonal.periods = c(13, # Hourly
+                                       13*7, # Weekly
+                                       13*7*4)) # Monthly
+                                                         
+# Decompose
+
+fnb_multi_decomp_rec <- fnb_multi_rec %>%
+   mstl()
+
+fnb_multi_decomp_rec %>%
+   tail(13*7*4) %>%
+   autoplot()
+
+```
+
+# Modelling based on Transformed Data
+As we already choose Multi-Seasonal ARIMA as our prediction model, we will create another Multi-Seasonal ARIMA model but based on our new MSTS object.
+```{r}
+# Create a Model
+
+fnb_arima_rec <- stlm(fnb_multi_rec, method = "arima")
+
+# Forecast
+
+f_arima_rec <- forecast(fnb_arima_rec, h = 13*7)
+
+# Revert the transformed value
+
+rec_rev_arima <- rec_rev(f_arima_rec$mean, rec = rec)
+
+# Check the accuracy
+
+accuracy(rec_rev_arima, fnb_test_msts$visitor)
+```
+
+```{r}
+# Residual Autocorrelation
+   
+Box.test(fnb_arima_rec$residuals, type = "Ljung-Box",
+         lag = 2*13*7)
+```
+```{r}
+fnb_clean
+```
+
+```{r}
+ fnb_prophet <- fnb_train_msts %>%
+   rename(ds = ds, y = visitor)
+p_model = prophet(fnb_prophet, yearly.seasonality=F)
+future = make_future_dataframe(p_model,periods = 7, freq = "days")
+forecast = predict(p_model,future)
+```
+
+```{r}
+dyplot.prophet(p_model,forecast)
+```
+
+```{r}
+multi = prophet(fnb_prophet,seasonality.mode = "multiplicative", yearly.seasonality = T)
+multi_forecast = predict(multi,future)
+```
+```{r}
+dyplot.prophet(multi,multi_forecast)
+```
+```{r}
+multi_forecast$mean
+
+```
+
